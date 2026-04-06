@@ -43,6 +43,7 @@
     "typescript": "~5.9.2"
   },
   "dependencies": {
+    "react-native-worklets": "0.1.0"
     "expo-document-picker": "~14.0.8",
     "expo-file-system": "~19.0.21",
     "react-native-tcp-socket": "^6.4.1"
