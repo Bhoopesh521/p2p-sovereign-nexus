@@ -17,12 +17,14 @@
       "supportsTablet": false
     },
     "android": {
-      "usesCleartextTraffic": true,
-      "permissions": [
-        "INTERNET",
-        "ACCESS_NETWORK_STATE",
-        "ACCESS_WIFI_STATE"
-      ]
+  "package": "com.yourcompany.p2pnexus",
+  "usesCleartextTraffic": true,
+  "permissions": [
+    "INTERNET",
+    "ACCESS_NETWORK_STATE",
+    "ACCESS_WIFI_STATE"
+  ]
+    
     },
     "web": {
       "favicon": "./assets/images/icon.png"
