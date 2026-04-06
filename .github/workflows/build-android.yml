@@ -41,7 +41,7 @@ jobs:
 
       - name: Run EAS build
         working-directory: artifacts/p2p-app
-        run: eas build --platform android --profile preview --non-interactive --output ./build/p2p-sovereign-nexus.apk
+        run: eas build --platform android --profile preview --non-interactive
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
