@@ -1,0 +1,1 @@
+Hello everyone this project is my 3rd attempt at creating a truly p2p app and as if 66th April 2026 it has succeeded so either you can clone this repo in order to trigger a GitHub action to build it (which will require a eas key in repo secrets) or you can use the apk files that I will be shortly uploading also please note that I have future plans for integrating yggdrasil.
