@@ -28,7 +28,7 @@
       "favicon": "./assets/images/icon.png"
     },
     "plugins": [
-      "react-native-tcp-socket",
+      
       [
         "expo-router",
         {
