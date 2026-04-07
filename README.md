@@ -20,11 +20,11 @@ Paste a peer's address. Connect. Done.
 
 ## Build It Yourself
 
-'''
+```
 git clone Bhoopesh/p2p-sovereign-nexus
 npm install 
 eas build --platform android
-'''
+```
 
 EAS configs included for GitHub Actions. APK release soon.
 
