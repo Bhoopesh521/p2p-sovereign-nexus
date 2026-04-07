@@ -1,4 +1,31 @@
-Hello everyone this project is my 3rd attempt at creating a truly p2p app and as of 6th April 2026 it has succeeded so either you can clone this repo in order to trigger a GitHub action to build it (which will require a eas key in repo secrets) or you can use the apk files that I will be shortly uploading also please note that I have future plans for integrating yggdrasil.
+# P2P Chat & File Share
+No servers. No signaling. Just direct P2P over Yggdrasil.
+
+
+## What
+Android app for chat + file sharing. Connects directly to peers using Yggdrasil IPv6 addresses. No central anything.
+
+Yes, Android hates P2P. No, I didn't care.
+
+## How
+Install Yggdrasil from F-Droid
+
+Turn on "Block connections without VPN"
+
+Share your 200: address
+
+Paste a peer's address. Connect. Done.
+
+(Your normal internet dies while using this. You're in **the mesh*.)
+
+Build It Yourself
+
+'git clone Bhoopesh521 '
+' npm install '
+' eas build --platform android'
+EAS configs included for GitHub Actions. APK release soon.
+
+
 ## Quirks (Not Bugs, Just Vibes)
 
 - **Keyboard covers IP input field** - The React Native keyboard module fought me and won. Use floating keyboard or add your peer addresses before typing your novel.
