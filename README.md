@@ -18,7 +18,8 @@ Paste a peer's address. Connect. Done.
 
 (Your normal internet dies while using this. You're in **__the mesh__**.)
 
-Build It Yourself
+## Build It Yourself
+
 '''
 git clone Bhoopesh/p2p-sovereign-nexus
 npm install 
