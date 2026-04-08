@@ -7,7 +7,6 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Platform } from "react-native";
 import TcpSocket from "react-native-tcp-socket";
 
 export type ConnectionStatus =
@@ -31,6 +30,7 @@ export interface P2PMessage {
   id: string;
   type: MessageType;
   from: string;
+  fromPort?: number;
   to?: string;
   text?: string;
   fileName?: string;
@@ -90,12 +90,25 @@ const P2PContext = createContext<P2PContextValue | null>(null);
 
 const STORAGE_KEY_PEERS = "p2p_peers";
 const STORAGE_KEY_PORT = "p2p_my_port";
+const STORAGE_KEY_MY_ID = "p2p_my_id";
 const DEFAULT_PORT = 9876;
 const CHUNK_SIZE = 32768;
 
 function makeId(): string {
   return Date.now().toString(36) + Math.random().toString(36).substring(2, 9);
 }
+
+function normalizeHost(host: string): string {
+  let h = host.replace(/^\[/, "").replace(/\]$/, "").toLowerCase().trim();
+  // Unwrap IPv4-mapped IPv6 addresses (e.g. ::ffff:192.168.1.1 → 192.168.1.1)
+  // so that a peer added as an IPv4 address matches correctly when the OS
+  // reports the remote address in IPv4-mapped form after binding to ::
+  const ipv4mapped = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (ipv4mapped) h = ipv4mapped[1];
+  return h;
+}
+
+type AnySocket = ReturnType<typeof TcpSocket.createConnection>;
 
 export function P2PProvider({ children }: { children: React.ReactNode }) {
   const [myPort, setMyPortState] = useState<number>(DEFAULT_PORT);
@@ -105,10 +118,28 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
   const [serverRunning, setServerRunning] = useState(false);
 
   const serverRef = useRef<ReturnType<typeof TcpSocket.createServer> | null>(null);
-  const socketsRef = useRef<Record<string, ReturnType<typeof TcpSocket.createConnection>>>({});
-  const inboundSocketsRef = useRef<Record<string, ReturnType<typeof TcpSocket.createServer> extends { on: (e: string, cb: (socket: infer S) => void) => any } ? S : any>>({});
+
+  // Outbound sockets (connections we initiated), keyed by peerId
+  const socketsRef = useRef<Record<string, AnySocket>>({});
+  // Inbound sockets (connections they initiated), keyed by peerId once identified,
+  // or by a temporary socketKey while still unidentified
+  const inboundSocketsRef = useRef<Record<string, AnySocket>>({});
+
   const bufferRef = useRef<Record<string, string>>({});
   const pendingTransfersRef = useRef<Record<string, FileTransfer>>({});
+
+  // Refs that mirror state so callbacks don't go stale
+  const myPortRef = useRef<number>(DEFAULT_PORT);
+  const myIdRef = useRef<string>("");
+  const peersRef = useRef<Peer[]>([]);
+
+  useEffect(() => {
+    peersRef.current = peers;
+  }, [peers]);
+
+  useEffect(() => {
+    myPortRef.current = myPort;
+  }, [myPort]);
 
   useEffect(() => {
     loadStoredData();
@@ -117,22 +148,36 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
       Object.values(socketsRef.current).forEach((s) => {
         try { s.destroy(); } catch (_) {}
       });
+      Object.values(inboundSocketsRef.current).forEach((s) => {
+        try { s.destroy(); } catch (_) {}
+      });
     };
   }, []);
 
   const loadStoredData = async () => {
     try {
-      const [peersStr, portStr] = await Promise.all([
+      const [peersStr, portStr, myIdStr] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEY_PEERS),
         AsyncStorage.getItem(STORAGE_KEY_PORT),
+        AsyncStorage.getItem(STORAGE_KEY_MY_ID),
       ]);
       if (peersStr) {
         const stored: Peer[] = JSON.parse(peersStr);
-        setPeers(stored.map((p) => ({ ...p, status: "offline" as const })));
+        const reset = stored.map((p) => ({ ...p, status: "offline" as const }));
+        setPeers(reset);
+        peersRef.current = reset;
       }
       if (portStr) {
-        setMyPortState(parseInt(portStr, 10));
+        const port = parseInt(portStr, 10);
+        setMyPortState(port);
+        myPortRef.current = port;
       }
+      let id = myIdStr;
+      if (!id) {
+        id = makeId();
+        await AsyncStorage.setItem(STORAGE_KEY_MY_ID, id);
+      }
+      myIdRef.current = id;
     } catch (_) {}
   };
 
@@ -140,13 +185,6 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
     try {
       await AsyncStorage.setItem(STORAGE_KEY_PEERS, JSON.stringify(updated));
     } catch (_) {}
-  }, []);
-
-  const setMyPort = useCallback((port: number) => {
-    setMyPortState(port);
-    AsyncStorage.setItem(STORAGE_KEY_PORT, port.toString());
-    stopServer();
-    setTimeout(() => startServer(port), 500);
   }, []);
 
   const stopServer = () => {
@@ -157,18 +195,28 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const processMessage = useCallback((msg: P2PMessage, socketKey: string) => {
+  // Returns the socket for a peer regardless of whether the connection is
+  // outbound (we called them) or inbound (they called us).
+  const getSocket = useCallback((peerId: string): AnySocket | null => {
+    return socketsRef.current[peerId] || inboundSocketsRef.current[peerId] || null;
+  }, []);
+
+  const processMessage = useCallback((msg: P2PMessage, resolvedPeerId: string) => {
     if (msg.type === "ping") {
-      const replySocket = socketsRef.current[msg.from] || inboundSocketsRef.current[socketKey];
+      const replySocket = socketsRef.current[resolvedPeerId] || inboundSocketsRef.current[resolvedPeerId];
       if (replySocket) {
-        const pong: P2PMessage = { id: makeId(), type: "pong", from: "me", timestamp: Date.now() };
-        try {
-          replySocket.write(JSON.stringify(pong) + "\n");
-        } catch (_) {}
+        const pong: P2PMessage = {
+          id: makeId(),
+          type: "pong",
+          from: myIdRef.current,
+          fromPort: myPortRef.current,
+          timestamp: Date.now(),
+        };
+        try { replySocket.write(JSON.stringify(pong) + "\n"); } catch (_) {}
       }
       setPeers((prev) =>
         prev.map((p) =>
-          p.id === msg.from ? { ...p, status: "connected", lastSeen: Date.now() } : p
+          p.id === resolvedPeerId ? { ...p, status: "connected", lastSeen: Date.now() } : p
         )
       );
       return;
@@ -177,7 +225,7 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
     if (msg.type === "pong") {
       setPeers((prev) =>
         prev.map((p) =>
-          p.id === msg.from ? { ...p, status: "connected", lastSeen: Date.now() } : p
+          p.id === resolvedPeerId ? { ...p, status: "connected", lastSeen: Date.now() } : p
         )
       );
       return;
@@ -186,7 +234,7 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
     if (msg.type === "text") {
       const chatMsg: ChatMessage = {
         id: msg.id,
-        peerId: msg.from,
+        peerId: resolvedPeerId,
         direction: "in",
         type: "text",
         text: msg.text,
@@ -195,7 +243,7 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
       };
       setMessages((prev) => ({
         ...prev,
-        [msg.from]: [...(prev[msg.from] || []), chatMsg],
+        [resolvedPeerId]: [...(prev[resolvedPeerId] || []), chatMsg],
       }));
       return;
     }
@@ -203,7 +251,7 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
     if (msg.type === "file") {
       const transfer: FileTransfer = {
         id: msg.id,
-        peerId: msg.from,
+        peerId: resolvedPeerId,
         fileName: msg.fileName!,
         fileSize: msg.fileSize!,
         fileType: msg.fileType!,
@@ -244,7 +292,7 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
       );
       const chatMsg: ChatMessage = {
         id: makeId(),
-        peerId: msg.from,
+        peerId: resolvedPeerId,
         direction: "in",
         type: "file",
         fileName: t.fileName,
@@ -256,88 +304,110 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
       };
       setMessages((prev) => ({
         ...prev,
-        [msg.from]: [...(prev[msg.from] || []), chatMsg],
+        [resolvedPeerId]: [...(prev[resolvedPeerId] || []), chatMsg],
       }));
     }
   }, []);
 
-  const handleSocketData = useCallback(
-    (data: Buffer | string, peerId: string, socketKey: string) => {
-      const str = typeof data === "string" ? data : data.toString("utf8");
-      bufferRef.current[peerId] = (bufferRef.current[peerId] || "") + str;
-      const lines = bufferRef.current[peerId].split("\n");
-      bufferRef.current[peerId] = lines.pop() || "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const msg: P2PMessage = JSON.parse(line);
-          processMessage(msg, socketKey);
-        } catch (_) {}
-      }
-    },
-    [processMessage]
-  );
+  const startServer = useCallback((port: number) => {
+    if (serverRef.current) return;
+    try {
+      const server = TcpSocket.createServer((socket) => {
+        const socketKey = `inbound_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        inboundSocketsRef.current[socketKey] = socket as any;
 
-  const startServer = useCallback(
-    (port: number) => {
-      if (serverRef.current) return;
-      try {
-        const server = TcpSocket.createServer((socket) => {
-          const socketKey = `inbound_${Date.now()}`;
-          inboundSocketsRef.current[socketKey] = socket as any;
+        // Starts as a temporary key, gets replaced with peerId once the remote
+        // identifies themselves via a ping containing their listening port.
+        let resolvedKey = socketKey;
 
-          socket.on("data", (data) => {
-            const str = typeof data === "string" ? data : (data as Buffer).toString("utf8");
-            bufferRef.current[socketKey] = (bufferRef.current[socketKey] || "") + str;
-            const lines = bufferRef.current[socketKey].split("\n");
-            bufferRef.current[socketKey] = lines.pop() || "";
-            for (const line of lines) {
-              if (!line.trim()) continue;
-              try {
-                const msg: P2PMessage = JSON.parse(line);
-                if (msg.from) {
-                  handleSocketData(data, msg.from, socketKey);
-                  setPeers((prev) =>
-                    prev.map((p) =>
-                      p.id === msg.from
-                        ? { ...p, status: "connected", lastSeen: Date.now() }
-                        : p
-                    )
-                  );
+        socket.on("data", (data) => {
+          const str = typeof data === "string" ? data : (data as Buffer).toString("utf8");
+          bufferRef.current[resolvedKey] = (bufferRef.current[resolvedKey] || "") + str;
+          const lines = bufferRef.current[resolvedKey].split("\n");
+          bufferRef.current[resolvedKey] = lines.pop() || "";
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const msg: P2PMessage = JSON.parse(line);
+
+              // If still unidentified and the message carries fromPort, try to
+              // match against known peers by host + listening port.
+              if (resolvedKey === socketKey && msg.fromPort != null) {
+                const remoteAddr = (socket as any).remoteAddress as string | undefined;
+                const matched = peersRef.current.find((p) => {
+                  if (p.port !== msg.fromPort) return false;
+                  if (!remoteAddr) return true;
+                  return normalizeHost(p.host) === normalizeHost(remoteAddr);
+                });
+                if (matched) {
+                  // Migrate buffer and socket reference to the real peer ID
+                  bufferRef.current[matched.id] = bufferRef.current[resolvedKey] || "";
+                  delete bufferRef.current[resolvedKey];
+                  inboundSocketsRef.current[matched.id] = inboundSocketsRef.current[socketKey];
+                  delete inboundSocketsRef.current[socketKey];
+                  resolvedKey = matched.id;
                 }
-              } catch (_) {}
-            }
-          });
+              }
 
-          socket.on("close", () => {
-            delete inboundSocketsRef.current[socketKey];
-          });
-
-          socket.on("error", () => {
-            delete inboundSocketsRef.current[socketKey];
-          });
+              processMessage(msg, resolvedKey);
+            } catch (_) {}
+          }
         });
 
-        server.listen({ port, host: "0.0.0.0" }, () => {
-          setServerRunning(true);
+        socket.on("close", () => {
+          delete inboundSocketsRef.current[resolvedKey];
+          delete bufferRef.current[resolvedKey];
+          // If we identified the peer, mark them offline
+          const isRealPeer = peersRef.current.some((p) => p.id === resolvedKey);
+          if (isRealPeer) {
+            setPeers((prev) =>
+              prev.map((p) =>
+                p.id === resolvedKey && p.status === "connected"
+                  ? { ...p, status: "offline" }
+                  : p
+              )
+            );
+          }
         });
 
-        server.on("error", () => {
-          setServerRunning(false);
-          serverRef.current = null;
+        socket.on("error", () => {
+          delete inboundSocketsRef.current[resolvedKey];
+          delete bufferRef.current[resolvedKey];
         });
+      });
 
-        serverRef.current = server;
-      } catch (_) {
+      // Bind to :: (all interfaces, IPv4 + IPv6) so Yggdrasil TUN connections
+      // and regular LAN/WiFi connections are both accepted on the same socket.
+      // When bound to ::, the OS reports IPv4 peers as ::ffff:x.x.x.x which
+      // normalizeHost() unwraps back to plain IPv4 for peer matching.
+      server.listen({ port, host: "::" }, () => {
+        setServerRunning(true);
+      });
+
+      server.on("error", () => {
         setServerRunning(false);
-      }
-    },
-    [handleSocketData]
-  );
+        serverRef.current = null;
+      });
+
+      serverRef.current = server;
+    } catch (_) {
+      setServerRunning(false);
+    }
+  }, [processMessage]);
 
   useEffect(() => {
     startServer(myPort);
   }, []);
+
+  const setMyPort = useCallback((port: number) => {
+    setMyPortState(port);
+    myPortRef.current = port;
+    AsyncStorage.setItem(STORAGE_KEY_PORT, port.toString());
+    stopServer();
+    // Give the OS time to fully release the port before rebinding
+    setTimeout(() => startServer(port), 800);
+  }, [startServer]);
 
   const addPeer = useCallback(
     (label: string, host: string, port: number) => {
@@ -358,6 +428,11 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
         socketsRef.current[id]?.destroy();
         delete socketsRef.current[id];
       } catch (_) {}
+      try {
+        inboundSocketsRef.current[id]?.destroy();
+        delete inboundSocketsRef.current[id];
+      } catch (_) {}
+      delete bufferRef.current[id];
       setPeers((prev) => {
         const updated = prev.filter((p) => p.id !== id);
         savePeers(updated);
@@ -369,7 +444,7 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
 
   const connectToPeer = useCallback(
     (peerId: string) => {
-      const peer = peers.find((p) => p.id === peerId);
+      const peer = peersRef.current.find((p) => p.id === peerId);
       if (!peer) return;
 
       if (socketsRef.current[peerId]) {
@@ -385,8 +460,8 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
       const options: any = {
         port: peer.port,
         host: peer.host,
-        localAddress: "0.0.0.0",
-        ...(isIPv6 ? { localPort: undefined } : {}),
+        // Use the correct wildcard address for the IP family we're dialing
+        localAddress: isIPv6 ? "::" : "0.0.0.0",
       };
 
       try {
@@ -398,16 +473,31 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
                 : p
             )
           );
+          // Identify ourselves to the remote side by sending our stable device ID
+          // and our listening port so they can match us to their peer list.
           const ping: P2PMessage = {
             id: makeId(),
             type: "ping",
-            from: peerId + "_reply",
+            from: myIdRef.current,
+            fromPort: myPortRef.current,
             timestamp: Date.now(),
           };
           try { socket.write(JSON.stringify(ping) + "\n"); } catch (_) {}
         });
 
-        socket.on("data", (data) => handleSocketData(data, peerId, peerId));
+        socket.on("data", (data) => {
+          const str = typeof data === "string" ? data : (data as Buffer).toString("utf8");
+          bufferRef.current[peerId] = (bufferRef.current[peerId] || "") + str;
+          const lines = bufferRef.current[peerId].split("\n");
+          bufferRef.current[peerId] = lines.pop() || "";
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const msg: P2PMessage = JSON.parse(line);
+              processMessage(msg, peerId);
+            } catch (_) {}
+          }
+        });
 
         socket.on("error", () => {
           setPeers((prev) =>
@@ -434,7 +524,7 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
         );
       }
     },
-    [peers, handleSocketData]
+    [processMessage]
   );
 
   const disconnectPeer = useCallback((peerId: string) => {
@@ -442,13 +532,13 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
       socketsRef.current[peerId]?.destroy();
       delete socketsRef.current[peerId];
     } catch (_) {}
+    try {
+      inboundSocketsRef.current[peerId]?.destroy();
+      delete inboundSocketsRef.current[peerId];
+    } catch (_) {}
     setPeers((prev) =>
       prev.map((p) => (p.id === peerId ? { ...p, status: "offline" } : p))
     );
-  }, []);
-
-  const getSocket = useCallback((peerId: string) => {
-    return socketsRef.current[peerId] || null;
   }, []);
 
   const sendTextMessage = useCallback(
@@ -459,7 +549,7 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
       const msg: P2PMessage = {
         id,
         type: "text",
-        from: "me",
+        from: myIdRef.current,
         text,
         timestamp: Date.now(),
       };
@@ -500,7 +590,7 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
       const header: P2PMessage = {
         id,
         type: "file",
-        from: "me",
+        from: myIdRef.current,
         fileName,
         fileSize,
         fileType,
@@ -532,7 +622,7 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
             const end: P2PMessage = {
               id,
               type: "file_end",
-              from: "me",
+              from: myIdRef.current,
               timestamp: Date.now(),
             };
             socket.write(JSON.stringify(end) + "\n");
@@ -564,7 +654,7 @@ export function P2PProvider({ children }: { children: React.ReactNode }) {
           const chunkMsg: P2PMessage = {
             id,
             type: "file_chunk",
-            from: "me",
+            from: myIdRef.current,
             chunkIndex: index,
             totalChunks,
             data: chunk,

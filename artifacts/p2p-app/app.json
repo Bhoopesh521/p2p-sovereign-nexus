@@ -14,28 +14,24 @@
       "backgroundColor": "#0d1117"
     },
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": false,
+      "bundleIdentifier": "com.sovereignnexus.p2p"
     },
     "android": {
-  "package": "com.yourcompany.p2pnexus",
-  "usesCleartextTraffic": true,
-  "permissions": [
-    "INTERNET",
-    "ACCESS_NETWORK_STATE",
-    "ACCESS_WIFI_STATE"
-  ]
-    
+      "package": "com.sovereignnexus.p2p",
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "ACCESS_WIFI_STATE"
+      ]
     },
     "web": {
       "favicon": "./assets/images/icon.png"
     },
     "plugins": [
-      
       [
-        "expo-router",
-        {
-          "origin": "https://replit.com/"
-        }
+        "expo-router"
       ],
       "expo-font",
       "expo-web-browser",
